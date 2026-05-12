@@ -15,43 +15,33 @@
 ///////////////////////////////////////////////////////////////////////////
 
 
+DESIGN CODE
+///////////////////////////////////////////////////////////////////////////
+// AHB-LITE PROTOCOL DESIGN 
 ///////////////////////////////////////////////////////////////////////////
 // MODULE 1 : Package
 ///////////////////////////////////////////////////////////////////////////
 
 package definesPkg;
 
-    // Memory parameters
-    parameter ADDRESS_DEPTH           = 1024;
-    parameter READ_ONLY_START_ADDRESS = 10'h000;
-    parameter READ_ONLY_END_ADDRESS   = 10'h003;
+    /**************** SLAVE ****************/
+    parameter   ADDRESS_DEPTH           = 1024;
+    parameter   READ_ONLY_START_ADDRESS = 32'h00000000;
+    parameter   READ_ONLY_END_ADDRESS   = 32'h00000003;
+    parameter   WAIT_ADDRESS            = 32'h00000005;
 
-    // Bus width parameters
-    parameter ADDRESS_WIDTH = 32;
-    parameter DATA_WIDTH    = 32;
-    parameter HSIZE_WIDTH   = 3;
-    parameter BURST_SIZE    = 3;
-    parameter TRANSFER_TYPE = 2;
+    /**************** INTERFACE ****************/
+    parameter   ADDRESS_WIDTH  = 32;
+    parameter   DATA_WIDTH     = 32;
+    parameter   HSIZE_WIDTH    = 3;
+    parameter   BURST_SIZE     = 3;
+    parameter   TRANSFER_TYPE  = 2;
 
-    // HTRANS encodings
-    parameter IDLE   = 2'b00;
-    parameter BUSY   = 2'b01;
-    parameter NONSEQ = 2'b10;
-    parameter SEQ    = 2'b11;
-
-    // HBURST encodings
-    parameter SINGLE = 3'b000;
-    parameter INCR   = 3'b001;
-    parameter WRAP4  = 3'b010;
-    parameter INCR4  = 3'b011;
-    parameter WRAP8  = 3'b100;
-    parameter INCR8  = 3'b101;
-    parameter WRAP16 = 3'b110;
-    parameter INCR16 = 3'b111;
-
-    // HRESP encodings
-    parameter OKAY  = 1'b0;
-    parameter ERROR = 1'b1;
+    // HTRANS encoding
+    parameter   IDLE    = 2'b00;
+    parameter   BUSY    = 2'b01;
+    parameter   NON_SEQ = 2'b10;
+    parameter   SEQ     = 2'b11;
 
 endpackage
 
@@ -68,92 +58,67 @@ interface AHBInterface (input logic HCLK, input logic HRESETn);
 
     //////////////////////////////////////////////// SIGNALS ///////////////
 
-    logic [ADDRESS_WIDTH-1:0]  HADDR;
-    logic                      HWRITE;
-    logic [HSIZE_WIDTH-1:0]    HSIZE;
-    logic [BURST_SIZE-1:0]     HBURST;
-    logic [TRANSFER_TYPE-1:0]  HTRANS;
-    logic [DATA_WIDTH-1:0]     HWDATA;
-    logic [DATA_WIDTH-1:0]     HRDATA;
-    logic                      HREADY;
-    logic                      HRESP;
+    logic [ADDRESS_WIDTH-1:0]   HADDR;
+    logic                       HWRITE;
+    logic [HSIZE_WIDTH-1:0]     HSIZE;
+    logic [BURST_SIZE-1:0]      HBURST;
+    logic [TRANSFER_TYPE-1:0]   HTRANS;
+    logic [DATA_WIDTH-1:0]      HWDATA;
+    logic [DATA_WIDTH-1:0]      HRDATA;
+    logic                       HREADY;
+    logic                       HRESP;
 
     //////////////////////////////////////////////// TASKS /////////////////
 
-    // -------------------------------------------------------------------
-    // Single Read
-    // -------------------------------------------------------------------
+ 
     task read(input  bit   [ADDRESS_WIDTH-1:0] addr,
               output logic [DATA_WIDTH-1:0]    data);
+        // Address phase
         @(posedge HCLK);
         HADDR  <= addr;
         HWRITE <= 1'b0;
         HSIZE  <= 3'b010;
-        HBURST <= SINGLE;
-        HTRANS <= NONSEQ;
+        HBURST <= 3'b000;
+        HTRANS <= NON_SEQ;          // FIX BUG-3: was missing
 
+        // Pipeline: one clock for address phase to settle
         @(posedge HCLK);
-        HTRANS <= IDLE;
+        HTRANS <= IDLE;             // de-assert after address phase
 
-        @(posedge HCLK);
+        // Data phase: wait for slave to be ready
+        @(posedge HCLK);            // FIX BUG-4: explicit wait for data phase
         while (!HREADY) @(posedge HCLK);
         data = HRDATA;
 
-        if (HRESP)
-            $display("[READ  TASK] ERROR RESPONSE from slave at addr=0x%08h", addr);
+        if (HRESP) $display("[READ  TASK] ERROR RESPONSE from slave at addr=0x%08h", addr);
     endtask
 
 
-    // -------------------------------------------------------------------
-    // Single Write
-    // -------------------------------------------------------------------
-    task write(input bit   [ADDRESS_WIDTH-1:0] addr,
-               input logic [DATA_WIDTH-1:0]    data);
-        @(posedge HCLK);
-        HADDR  <= addr;
-        HWRITE <= 1'b1;
-        HSIZE  <= 3'b010;
-        HBURST <= SINGLE;
-        HTRANS <= NONSEQ;
-        while (!HREADY) @(posedge HCLK);
 
-        @(posedge HCLK);
-        `ifndef ERROR_INJECT
-            HWDATA <= data;
-        `endif
-        HTRANS <= IDLE;
-        HWRITE <= 1'b0;
-
-        @(posedge HCLK);
-        if (HRESP)
-            $display("[WRITE TASK] ERROR â€” write to addr 0x%08h", addr);
-    endtask
-
-
-    // -------------------------------------------------------------------
-    // Burst Read
-    // -------------------------------------------------------------------
     task burst_read(input  bit   [ADDRESS_WIDTH-1:0] addr,
                     input  int                        BEATS,
                     input  int                        busy,
-                    output logic [DATA_WIDTH-1:0]     data_burst[31:0]);
+                    output logic [DATA_WIDTH-1:0]     data_burst[31:0]);  // FIX BUG-10
         automatic int i = 0;
         automatic int j = 0;
 
+        // Address phase — first beat NON_SEQ
         @(posedge HCLK);
         HADDR  <= addr;
-        HTRANS <= NONSEQ;
+        HTRANS <= NON_SEQ;
         HWRITE <= 1'b0;
         HSIZE  <= 3'b010;
-        HBURST <= (BEATS == 4)  ? INCR4  :
-                  (BEATS == 8)  ? INCR8  :
-                  (BEATS == 16) ? INCR16 : INCR;
+        HBURST <= (BEATS == 4)  ? 3'b011 :
+                  (BEATS == 8)  ? 3'b101 :
+                  (BEATS == 16) ? 3'b111 : 3'b001; // INCR if unknown
 
+        // Second address / BUSY insertion
         @(posedge HCLK);
         `ifndef ERROR_INJECT
             HADDR <= addr + 1;
         `endif
 
+        // Insert BUSY cycles before continuing
         repeat(busy) begin
             j++;
             HTRANS <= BUSY;
@@ -162,18 +127,20 @@ interface AHBInterface (input logic HCLK, input logic HRESETn);
         end
         if (busy == 0) HTRANS <= SEQ;
 
+        // Middle beats
         i = 0;
         repeat(BEATS - 2) begin
             @(posedge HCLK);
-            HADDR <= HADDR + 1;
+            HADDR       <= HADDR + 1;
             `ifndef ERROR_INJECT
-                HTRANS <= SEQ;
+                HTRANS  <= SEQ;
             `endif
             while (!HREADY) @(posedge HCLK);
             data_burst[i] = HRDATA;
             i = i + 1;
         end
 
+        // Last two data beats (pipelined)
         @(posedge HCLK);
         HTRANS <= IDLE;
         while (!HREADY) @(posedge HCLK);
@@ -186,43 +153,73 @@ interface AHBInterface (input logic HCLK, input logic HRESETn);
     endtask
 
 
-    // -------------------------------------------------------------------
-    // Burst Write
-    // -------------------------------------------------------------------
+
+    task write(input bit   [ADDRESS_WIDTH-1:0] addr,
+               input logic [DATA_WIDTH-1:0]    data);
+        // Address phase
+        @(posedge HCLK);
+        HADDR  <= addr;
+        HWRITE <= 1'b1;
+        HSIZE  <= 3'b010;
+        HBURST <= 3'b000;
+        HTRANS <= NON_SEQ;          
+        while (!HREADY) @(posedge HCLK);
+
+        // Data phase
+        @(posedge HCLK);
+        `ifndef ERROR_INJECT
+            HWDATA <= data;
+        `endif
+        HTRANS <= IDLE;             
+        HWRITE <= 1'b0;
+
+        @(posedge HCLK);
+        if (HRESP)
+            $display("[WRITE TASK] ERROR — write to read-only address 0x%08h", addr);
+    endtask
+
+
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
     task burst_write(input bit   [ADDRESS_WIDTH-1:0] addr,
                      input int                        BEATS,
                      input int                        busy,
                      input logic [DATA_WIDTH-1:0]     data_arr[31:0]);
 
-        automatic int ai = 0;
-        automatic int di = 0;
-        automatic int bi = 0;
+        automatic int ai = 0;   // address-phase beat counter  (FIX BUG-8)
+        automatic int di = 0;   // data-phase beat counter
+        automatic int bi = 0;   // busy-beat counter
         automatic bit [ADDRESS_WIDTH-1:0] cur_addr = addr;
 
-        if      (BEATS == 4)  HBURST <= INCR4;
-        else if (BEATS == 8)  HBURST <= INCR8;
-        else if (BEATS == 16) HBURST <= INCR16;
-        else                  HBURST <= INCR;
+        if      (BEATS == 4)  HBURST <= 3'b011;
+        else if (BEATS == 8)  HBURST <= 3'b101;
+        else if (BEATS == 16) HBURST <= 3'b111;
+        else                  HBURST <= 3'b001;  // INCR
 
         if (HRESP) $display("[BURST_WRITE] Unexpected HRESP at start");
 
         fork
-            // Address phase thread
+            // ------ Address phase thread ------
             begin : addr_thread
                 repeat(BEATS) begin
                     @(posedge HCLK);
                     while (!HREADY) @(posedge HCLK);
 
-                    HADDR  <= cur_addr;
+                    HADDR  <= cur_addr;              
                     `ifndef ERROR_INJECT
                         HWRITE <= 1'b1;
                     `endif
 
-                    HTRANS <= (ai == 0) ? NONSEQ : SEQ;
+                    if (ai == 0)
+                        HTRANS <= NON_SEQ;
+                    else
+                        HTRANS <= SEQ;               
 
                     cur_addr = cur_addr + 4;
                     ai = ai + 1;
 
+                    // BUSY insertion after beat 1 
                     if (busy >= 1 && ai == 2) begin
                         HTRANS <= BUSY;
                         @(posedge HCLK);
@@ -237,15 +234,16 @@ interface AHBInterface (input logic HCLK, input logic HRESETn);
                 HWRITE <= 1'b0;
             end
 
-            // Data phase thread
+            // ------ Data phase thread ------
             begin : data_thread
-                @(posedge HCLK);
+                @(posedge HCLK);  // pipeline offset: data is one cycle behind address
                 repeat(BEATS) begin
                     while (!HREADY) @(posedge HCLK);
                     HWDATA <= data_arr[di];
                     di = di + 1;
                     bi = bi + 1;
 
+                    // Match BUSY stalls in address thread
                     if (busy >= 1 && bi == 2) @(posedge HCLK);
                     if (busy >= 2 && bi == 3) begin
                         @(posedge HCLK);
@@ -262,22 +260,38 @@ interface AHBInterface (input logic HCLK, input logic HRESETn);
     //////////////////////////////////////////////// MODPORTS //////////////
 
     modport Slave (
-        output HRDATA, HREADY, HRESP,
-        input  HADDR, HWRITE, HSIZE, HBURST, HTRANS, HWDATA,
-        input  HCLK, HRESETn
+        output  HREADY,
+        output  HRESP,
+        output  HRDATA,
+        input   HADDR,
+        input   HWRITE,
+        input   HSIZE,
+        input   HBURST,
+        input   HTRANS,
+        input   HWDATA,
+        input   HCLK,
+        input   HRESETn
     );
 
     modport Master (
-        output HADDR, HWRITE, HSIZE, HBURST, HTRANS, HWDATA,
-        input  HRDATA, HREADY, HRESP,
-        input  HCLK, HRESETn
+        output  HADDR,
+        output  HWRITE,
+        output  HSIZE,
+        output  HBURST,
+        output  HTRANS,
+        output  HWDATA,
+        input   HRDATA,
+        input   HREADY,
+        input   HRESP,
+        input   HCLK,
+        input   HRESETn
     );
 
 endinterface
 
 
 ///////////////////////////////////////////////////////////////////////////
-// MODULE 3 : AHB Slave Memory
+// MODULE 3 : AHB Slave Memory (Core Slave RTL)
 ///////////////////////////////////////////////////////////////////////////
 
 module AHBSlaveMemory (
@@ -289,64 +303,71 @@ module AHBSlaveMemory (
     input  logic        HWRITE,
     input  logic        HSEL,
     input  logic        wait_slave_to_master,
-
     output logic [31:0] HRDATA,
-    output logic        HREADY,
-    output logic        HRESP
+    output logic        HRESP,
+    output logic        HREADY
 );
 
-    import definesPkg::*;
+   
+    parameter   ADDR_SPACE              = 10;
+    parameter   READ_ONLY_START_ADDR    = 10'h000;
+    parameter   READ_ONLY_END_ADDR      = 10'h003;
 
-    logic [31:0] mem      [0:1023];
-    logic [9:0]  addr_reg;
+    logic [9:0]  addr_reg;  // registered address (pipeline stage)
+    logic [31:0] MemoryArray [2**ADDR_SPACE-1:0];
 
     always_ff @(posedge HCLK or negedge HRESETn) begin
         if (!HRESETn) begin
-            HREADY   <= 1'b1;
-            HRESP    <= 1'b0;
-            HRDATA   <= '0;
-            addr_reg <= '0;
+            HREADY    <= 1'b1;
+            HRESP     <= 1'b0;
+            addr_reg  <= '0;
+            HRDATA    <= '0;
             `ifdef ERROR_INJECT
-                HRESP <= 1'b1;
+                HRESP <= 1'b1;   
             `endif
         end
         else if (HSEL) begin
-
-            if (HTRANS == IDLE || HTRANS == BUSY) begin
+            // IDLE or BUSY — slave is transparent, no action
+            if (HTRANS == 2'b00 || HTRANS == 2'b01) begin
                 HREADY <= 1'b1;
                 HRESP  <= 1'b0;
             end
             else begin
+                // NON_SEQ or SEQ transfer
                 if (wait_slave_to_master) begin
+                    // Insert wait state — hold HREADY low
                     HREADY <= 1'b0;
                     HRESP  <= 1'b0;
                 end
                 else begin
                     if (HWRITE) begin
-                        // Read-only region protection
-                        if (addr_reg >= READ_ONLY_START_ADDRESS &&
-                            addr_reg <= READ_ONLY_END_ADDRESS) begin
+                        // ---- Write operation ----
+                      
+                        if (HADDR >= READ_ONLY_START_ADDR &&
+                            HADDR <= READ_ONLY_END_ADDR) begin
+                            // Write to read-only region → error response
                             HREADY <= 1'b1;
                             `ifndef ERROR_INJECT
                                 HRESP <= 1'b1;
                             `else
-                                HRESP <= 1'b0;
+                                HRESP <= 1'b0;   // ERROR INJECTION suppresses error
                             `endif
                         end
                         else begin
-                            mem[addr_reg] <= HWDATA;   // pipelined write
-                            addr_reg      <= HADDR;
+                            MemoryArray[HADDR] <= HWDATA;
+                            addr_reg           <= HADDR;
                             `ifndef ERROR_INJECT
                                 HREADY <= 1'b1;
                             `else
-                                HREADY <= 1'b0;
+                                HREADY <= 1'b0;  // ERROR INJECTION holds HREADY low
                             `endif
                             HRESP <= 1'b0;
                         end
                     end
                     else begin
+                       
                         addr_reg <= HADDR;
-                        HRDATA   <= mem[addr_reg];
+                        HRDATA   <= MemoryArray[HADDR];  // use HADDR directly for 1-cycle read
                         HREADY   <= 1'b1;
                         HRESP    <= 1'b0;
                     end
@@ -354,6 +375,7 @@ module AHBSlaveMemory (
             end
         end
         else begin
+            // Slave not selected — default ready, no error
             HREADY <= 1'b1;
             HRESP  <= 1'b0;
         end
@@ -363,73 +385,87 @@ endmodule
 
 
 ///////////////////////////////////////////////////////////////////////////
-// MODULE 4 : AHB Slave Top
+// MODULE 4 : Address Decoder
 ///////////////////////////////////////////////////////////////////////////
 
+`define NoOfSlaves 2
+
+module decoder (
+  
+    input  logic [$clog2(`NoOfSlaves)-1:0]  Decode_address,
+    output logic [`NoOfSlaves-1:0]           HSEL
+);
+    assign HSEL = (`NoOfSlaves'b1) << Decode_address;
+endmodule
+
+
+///////////////////////////////////////////////////////////////////////////
+// MODULE 5 : AHB Slave Top (Wrapper + Decoder + Multi-slave)
+///////////////////////////////////////////////////////////////////////////
+
+parameter AddrBusWidth = 32;
+parameter AddrSpace    = 10;
+
 module AHBSlaveTop (
-    AHBInterface SlaveInterface,
-    input logic  wait_slave_to_master
+    AHBInterface        SlaveInterface,
+    input logic         wait_slave_to_master
 );
 
-    import definesPkg::*;
+    logic [`NoOfSlaves-1:0]         HSEL;
+    logic [`NoOfSlaves-1:0][31:0]   HRDATA_BUS;
+    logic [`NoOfSlaves-1:0]         HRESP_BUS;
+    logic [`NoOfSlaves-1:0]         HREADY_BUS;
 
-    logic [1:0]  HSEL;
-    logic [31:0] HRDATA_s0, HRDATA_s1;
-    logic        HREADY_s0, HREADY_s1;
-    logic        HRESP_s0,  HRESP_s1;
+    logic [$clog2(`NoOfSlaves)-1:0] decode_address;
 
-    // Decoder â€” clean address range based (from Code 3)
-    always_comb begin
-        HSEL = 2'b00;
-        if      (SlaveInterface.HADDR < 32'd1024) HSEL = 2'b01;
-        else if (SlaveInterface.HADDR < 32'd2048) HSEL = 2'b10;
-        else                                      HSEL = 2'b00;
-    end
+    assign decode_address =
+        SlaveInterface.HADDR[AddrSpace + $clog2(`NoOfSlaves) - 1 : AddrSpace];
 
-    AHBSlaveMemory S0 (
-        .HCLK                 (SlaveInterface.HCLK),
-        .HRESETn              (SlaveInterface.HRESETn),
-        .HADDR                (SlaveInterface.HADDR[9:0]),
-        .HWDATA               (SlaveInterface.HWDATA),
-        .HTRANS               (SlaveInterface.HTRANS),
-        .HWRITE               (SlaveInterface.HWRITE),
-        .HSEL                 (HSEL[0]),
-        .wait_slave_to_master (wait_slave_to_master),
-        .HRDATA               (HRDATA_s0),
-        .HREADY               (HREADY_s0),
-        .HRESP                (HRESP_s0)
+    // Decoder instance
+    decoder AHB_DEC (
+        .Decode_address (decode_address),
+        .HSEL           (HSEL)
     );
 
-    AHBSlaveMemory S1 (
-        .HCLK                 (SlaveInterface.HCLK),
-        .HRESETn              (SlaveInterface.HRESETn),
-        .HADDR                (SlaveInterface.HADDR[9:0]),
-        .HWDATA               (SlaveInterface.HWDATA),
-        .HTRANS               (SlaveInterface.HTRANS),
-        .HWRITE               (SlaveInterface.HWRITE),
-        .HSEL                 (HSEL[1]),
-        .wait_slave_to_master (wait_slave_to_master),
-        .HRDATA               (HRDATA_s1),
-        .HREADY               (HREADY_s1),
-        .HRESP                (HRESP_s1)
-    );
+    // Generate multiple slave instances
+    genvar i;
+    generate
+        for (i = 0; i < `NoOfSlaves; i++) begin : slave_gen
+            AHBSlaveMemory AHBMemi (
+                .HCLK                 (SlaveInterface.HCLK),
+                .HRESETn              (SlaveInterface.HRESETn),
+                .HADDR                (SlaveInterface.HADDR[AddrSpace-1:0]),
+                .HWDATA               (SlaveInterface.HWDATA),
+                .HTRANS               (SlaveInterface.HTRANS),
+                .HWRITE               (SlaveInterface.HWRITE),
+                .HSEL                 (HSEL[i]),
+                .wait_slave_to_master (wait_slave_to_master),
+                .HRDATA               (HRDATA_BUS[i]),
+                .HRESP                (HRESP_BUS[i]),
+                .HREADY               (HREADY_BUS[i])
+            );
+        end
+    endgenerate
 
-    // Response mux + protocol-compliant default slave (from Code 3)
+ 
     always_comb begin
-        if (HSEL == 2'b00) begin
-            SlaveInterface.HREADY = 1'b1;
-            SlaveInterface.HRESP  = 1'b1;
-            SlaveInterface.HRDATA = 32'hDEAD_BEEF;
-        end
-        else if (HSEL[0]) begin
-            SlaveInterface.HREADY = HREADY_s0;
-            SlaveInterface.HRESP  = HRESP_s0;
-            SlaveInterface.HRDATA = HRDATA_s0;
-        end
-        else begin
-            SlaveInterface.HREADY = HREADY_s1;
-            SlaveInterface.HRESP  = HRESP_s1;
-            SlaveInterface.HRDATA = HRDATA_s1;
+        // Default: select from the addressed slave
+        SlaveInterface.HRDATA = HRDATA_BUS[decode_address];
+        SlaveInterface.HRESP  = HRESP_BUS[decode_address];
+        SlaveInterface.HREADY = HREADY_BUS[decode_address];
+
+        // Out-of-range address: override with default slave error response
+        if (SlaveInterface.HADDR >= (`NoOfSlaves * (2 ** AddrSpace))) begin
+            if (SlaveInterface.HTRANS == 2'b10 ||
+                SlaveInterface.HTRANS == 2'b11) begin
+                SlaveInterface.HRESP  = 1'b1;
+                SlaveInterface.HREADY = 1'b0;
+            end
+            else begin
+                SlaveInterface.HRESP  = 1'b0;
+                SlaveInterface.HREADY = 1'b1;
+            end
+            SlaveInterface.HRDATA = 32'hDEAD_BEEF;  
         end
     end
 
@@ -437,32 +473,38 @@ endmodule
 
 
 ///////////////////////////////////////////////////////////////////////////
-// MODULE 5 : AHB Master (Synthesizable RTL)
+// MODULE 6 : AHB Master (Synthesizable RTL)
 ///////////////////////////////////////////////////////////////////////////
 
 module AHBMaster (
-    input  logic         HCLK,
-    input  logic         HRESETn,
+    input  logic                        HCLK,
+    input  logic                        HRESETn,
 
-    input  logic         transfer_req,
-    input  logic         write_en,
-    input  logic [31:0]  addr_in,
-    input  logic [31:0]  wdata_in,
-    input  logic [2:0]   hsize_in,
-    input  logic         burst_en,
-    input  logic [2:0]   burst_type_in,
-    input  logic [4:0]   burst_beats_in,
+    // Control inputs from testbench
+    input  logic                        transfer_req,
+    input  logic                        write_en,
+    input  logic [31:0]                 addr_in,
+    input  logic [31:0]                 wdata_in,
+    input  logic [2:0]                  hsize_in,
+    input  logic                        burst_en,
+    input  logic [2:0]                  burst_type_in,
+    input  logic [4:0]                  burst_beats_in,
 
-    output logic [31:0]  rdata_out,
-    output logic         transfer_done,
-    output logic         master_busy,
-    output logic         error_flag,
+    // Status outputs to testbench
+    output logic [31:0]                 rdata_out,
+    output logic                        transfer_done,
+    output logic                        master_busy,
+    output logic                        error_flag,
 
-    AHBInterface.Master  MasterInterface
+    // AHB-Lite bus
+    AHBInterface.Master                 MasterInterface
 );
 
     import definesPkg::*;
 
+    // -------------------------------------------------------------------
+    // State Machine
+    // -------------------------------------------------------------------
     typedef enum logic [2:0] {
         ST_IDLE        = 3'b000,
         ST_SINGLE_ADDR = 3'b001,
@@ -475,43 +517,65 @@ module AHBMaster (
 
     state_t current_state, next_state;
 
+    // Internal registers
     logic [31:0] haddr_reg;
     logic [31:0] hwdata_reg;
-    logic [31:0] last_hwdata_reg;
     logic        hwrite_reg;
     logic [2:0]  hsize_reg;
     logic [2:0]  hburst_reg;
     logic [4:0]  beat_count;
+    logic [31:0] last_hwdata_reg;   
 
+    // State register
     always_ff @(posedge HCLK or negedge HRESETn) begin
         if (!HRESETn) current_state <= ST_IDLE;
         else          current_state <= next_state;
     end
 
+    // Next state logic
     always_comb begin
         next_state = current_state;
         case (current_state)
             ST_IDLE:
                 if (transfer_req)
                     next_state = burst_en ? ST_BURST_ADDR : ST_SINGLE_ADDR;
+
             ST_SINGLE_ADDR:
                 next_state = ST_SINGLE_DATA;
-            ST_SINGLE_DATA:
-                if      (MasterInterface.HRESP)  next_state = ST_ERROR;
-                else if (MasterInterface.HREADY) next_state = ST_IDLE;
+
+            ST_SINGLE_DATA: begin
+                if (MasterInterface.HRESP)
+                    next_state = ST_ERROR;
+                else if (MasterInterface.HREADY)
+                    next_state = ST_IDLE;
+            end
+
             ST_BURST_ADDR:
                 next_state = ST_BURST_DATA;
-            ST_BURST_DATA:
-                if      (MasterInterface.HRESP)                         next_state = ST_ERROR;
-                else if (MasterInterface.HREADY && beat_count == 5'd1)  next_state = ST_BURST_LAST;
-            ST_BURST_LAST:
-                if      (MasterInterface.HRESP)  next_state = ST_ERROR;
-                else if (MasterInterface.HREADY) next_state = ST_IDLE;
-            ST_ERROR:       next_state = ST_IDLE;
-            default:        next_state = ST_IDLE;
+
+            ST_BURST_DATA: begin
+                if (MasterInterface.HRESP)
+                    next_state = ST_ERROR;
+                else if (MasterInterface.HREADY && beat_count == 5'd1)
+                    next_state = ST_BURST_LAST;
+            end
+
+            ST_BURST_LAST: begin
+                if (MasterInterface.HRESP)
+                    next_state = ST_ERROR;
+                else if (MasterInterface.HREADY)
+                    next_state = ST_IDLE;
+            end
+
+            ST_ERROR:
+                next_state = ST_IDLE;
+
+            default:
+                next_state = ST_IDLE;
         endcase
     end
 
+    // Output / datapath logic
     always_ff @(posedge HCLK or negedge HRESETn) begin
         if (!HRESETn) begin
             haddr_reg                  <= '0;
@@ -546,12 +610,13 @@ module AHBMaster (
                         hwrite_reg      <= write_en;
                         hsize_reg       <= hsize_in;
                         hwdata_reg      <= wdata_in;
-                        last_hwdata_reg <= wdata_in;
+                        last_hwdata_reg <= wdata_in;  
                         if (burst_en) begin
                             hburst_reg <= burst_type_in;
                             beat_count <= burst_beats_in - 1;
-                        end else
+                        end else begin
                             hburst_reg <= 3'b000;
+                        end
                     end
                 end
 
@@ -560,13 +625,15 @@ module AHBMaster (
                     MasterInterface.HWRITE <= hwrite_reg;
                     MasterInterface.HSIZE  <= hsize_reg;
                     MasterInterface.HBURST <= 3'b000;
-                    MasterInterface.HTRANS <= NONSEQ;
+                    MasterInterface.HTRANS <= NON_SEQ;
                 end
 
                 ST_SINGLE_DATA: begin
-                    if (hwrite_reg) MasterInterface.HWDATA <= hwdata_reg;
+                    if (hwrite_reg)
+                        MasterInterface.HWDATA <= hwdata_reg;
                     if (MasterInterface.HREADY) begin
-                        if (!hwrite_reg) rdata_out <= MasterInterface.HRDATA;
+                        if (!hwrite_reg)
+                            rdata_out <= MasterInterface.HRDATA;
                         if (!MasterInterface.HRESP) begin
                             transfer_done          <= 1'b1;
                             MasterInterface.HTRANS <= IDLE;
@@ -583,22 +650,24 @@ module AHBMaster (
                     MasterInterface.HWRITE <= hwrite_reg;
                     MasterInterface.HSIZE  <= hsize_reg;
                     MasterInterface.HBURST <= hburst_reg;
-                    MasterInterface.HTRANS <= NONSEQ;
+                    MasterInterface.HTRANS <= NON_SEQ;
                 end
 
                 ST_BURST_DATA: begin
                     if (MasterInterface.HREADY) begin
-                        if (!hwrite_reg) rdata_out <= MasterInterface.HRDATA;
+                        if (!hwrite_reg)
+                            rdata_out <= MasterInterface.HRDATA;
                         if (beat_count > 5'd1) begin
                             haddr_reg              <= haddr_reg + 4;
                             MasterInterface.HADDR  <= haddr_reg + 4;
                             MasterInterface.HTRANS <= SEQ;
-                            last_hwdata_reg        <= hwdata_reg;
+                            last_hwdata_reg        <= hwdata_reg;  
                             hwdata_reg             <= wdata_in;
                             MasterInterface.HWDATA <= hwdata_reg;
                             beat_count             <= beat_count - 1;
                         end
                         else begin
+                            
                             MasterInterface.HTRANS <= IDLE;
                             MasterInterface.HWDATA <= hwdata_reg;
                             beat_count             <= 5'd0;
@@ -612,13 +681,17 @@ module AHBMaster (
 
                 ST_BURST_LAST: begin
                     MasterInterface.HTRANS <= IDLE;
+                    
                     if (hwrite_reg)
                         MasterInterface.HWDATA <= last_hwdata_reg;
                     if (MasterInterface.HREADY) begin
-                        if (!hwrite_reg) rdata_out <= MasterInterface.HRDATA;
-                        if (!MasterInterface.HRESP) transfer_done <= 1'b1;
+                        if (!hwrite_reg)
+                            rdata_out <= MasterInterface.HRDATA;
+                        if (!MasterInterface.HRESP)
+                            transfer_done <= 1'b1;
                     end
-                    if (MasterInterface.HRESP) error_flag <= 1'b1;
+                    if (MasterInterface.HRESP)
+                        error_flag <= 1'b1;
                 end
 
                 ST_ERROR: begin
@@ -638,3 +711,1106 @@ module AHBMaster (
 
 endmodule
 
+
+
+
+
+S1-S13 CODE
+/// =========================================================================
+// EXTENDED TESTBENCH — AHB-Lite 13-Scenario TB  (WAVEFORM-DEBUGGED)
+// EDA Playground → Aldec Riviera-PRO 2025.05
+// LEFT pane  : this file
+// RIGHT pane : design.sv (fixed design)
+// Compile    : -timescale 1ns/1ns -sv2k9
+// Run        : +access+r
+//
+// WAVEFORM FIXES vs previous version:
+//   WF-FIX-1  wait_ctrl driven with blocking = (not <=) so the port sees
+//             the new value before the very next @posedge — Riviera 2025.05
+//             does not re-evaluate combinational slave logic on a <=
+//             assignment made in the same delta as the clock edge.
+//   WF-FIX-2  S5/S6: wait_ctrl raised with a half-cycle (#1) delay after
+//             @(posedge HCLK) so it is sampled by the slave on the NEXT
+//             rising edge (avoids race with always_ff).
+//   WF-FIX-3  S4 out-of-range: AHBSlaveTop drives HRESP=1/HREADY=0
+//             combinationally (always_comb). The master ST_SINGLE_DATA
+//             state sees HRESP on the very first data-phase clock. Added
+//             an explicit one-clock pre-settle after transfer_req before
+//             the while-loop so the FSM has at least one full clock to
+//             register HRESP=1 → error_flag.
+//   WF-FIX-4  S6 pre-write: added repeat(5) gap after the pre-write to
+//             0x40 so the MemoryArray write fully commits before the
+//             wait-state read begins (avoids X on HRDATA).
+//   WF-FIX-5  wait_ctrl de-asserted with blocking = and a #1 guard before
+//             the while-loop so the slave releases HREADY before the FSM
+//             samples it again.
+// =========================================================================
+`timescale 1ns/1ns
+
+module tb;
+
+    // -----------------------------------------------------------------------
+    // Clock & Reset
+    // -----------------------------------------------------------------------
+    logic HCLK;
+    logic HRESETn;
+
+    // -----------------------------------------------------------------------
+    // Master control inputs
+    // -----------------------------------------------------------------------
+    logic        transfer_req;
+    logic        write_en;
+    logic [31:0] addr_in;
+    logic [31:0] wdata_in;
+    logic [2:0]  hsize_in;
+    logic        burst_en;
+    logic [2:0]  burst_type_in;
+    logic [4:0]  burst_beats_in;
+
+    // -----------------------------------------------------------------------
+    // Master status outputs
+    // -----------------------------------------------------------------------
+    logic [31:0] rdata_out;
+    logic        transfer_done;
+    logic        master_busy;
+    logic        error_flag;
+
+    // -----------------------------------------------------------------------
+    // Captured error (FIX-3: latch before FSM clears)
+    // -----------------------------------------------------------------------
+    logic captured_error;
+
+    // -----------------------------------------------------------------------
+    // Wait-state control (WF-FIX-1: plain logic, driven with blocking =)
+    // -----------------------------------------------------------------------
+    logic wait_ctrl;
+
+    // -----------------------------------------------------------------------
+    // Interface + DUTs
+    // -----------------------------------------------------------------------
+    AHBInterface intf (.HCLK(HCLK), .HRESETn(HRESETn));
+
+    AHBMaster master (
+        .HCLK           (HCLK),
+        .HRESETn        (HRESETn),
+        .transfer_req   (transfer_req),
+        .write_en       (write_en),
+        .addr_in        (addr_in),
+        .wdata_in       (wdata_in),
+        .hsize_in       (hsize_in),
+        .burst_en       (burst_en),
+        .burst_type_in  (burst_type_in),
+        .burst_beats_in (burst_beats_in),
+        .rdata_out      (rdata_out),
+        .transfer_done  (transfer_done),
+        .master_busy    (master_busy),
+        .error_flag     (error_flag),
+        .MasterInterface(intf)
+    );
+
+    AHBSlaveTop slave_top (
+        .SlaveInterface       (intf),
+        .wait_slave_to_master (wait_ctrl)
+    );
+
+    // -----------------------------------------------------------------------
+    // Clock — 100 MHz
+    // -----------------------------------------------------------------------
+    initial HCLK = 0;
+    always  #5 HCLK = ~HCLK;
+
+    // -----------------------------------------------------------------------
+    // Waveform dump
+    // -----------------------------------------------------------------------
+    initial begin
+        $dumpfile("dump.vcd");
+        $dumpvars(0, tb);
+    end
+
+    // =========================================================================
+    // TASK : single_write
+    // =========================================================================
+    task automatic single_write(input [31:0] addr, input [31:0] data);
+        @(posedge HCLK);
+        addr_in      <= addr;
+        wdata_in     <= data;
+        write_en     <= 1'b1;
+        hsize_in     <= 3'b010;
+        burst_en     <= 1'b0;
+        transfer_req <= 1'b1;
+
+        @(posedge HCLK);
+        while (!transfer_done && !error_flag) @(posedge HCLK);
+
+        captured_error = error_flag;
+        transfer_req  <= 1'b0;
+        write_en      <= 1'b0;
+        @(posedge HCLK);
+
+        if (!captured_error)
+            $display("    WRITE PASS  addr=0x%08h  data=0x%08h", addr, data);
+        else
+            $display("    WRITE ERROR addr=0x%08h  (HRESP=1)", addr);
+    endtask
+
+    // =========================================================================
+    // TASK : single_read
+    // =========================================================================
+    task automatic single_read(input [31:0] addr);
+        @(posedge HCLK);
+        addr_in      <= addr;
+        write_en     <= 1'b0;
+        hsize_in     <= 3'b010;
+        burst_en     <= 1'b0;
+        transfer_req <= 1'b1;
+
+        @(posedge HCLK);
+        while (!transfer_done && !error_flag) @(posedge HCLK);
+
+        captured_error = error_flag;
+        transfer_req  <= 1'b0;
+        @(posedge HCLK);   // FIX-7: rdata_out settle
+
+        if (!captured_error)
+            $display("    READ  PASS  addr=0x%08h  data=0x%08h", addr, rdata_out);
+        else
+            $display("    READ  ERROR addr=0x%08h", addr);
+    endtask
+
+    // =========================================================================
+    // TASK : wait_write_task
+    // Separate task for wait-state write so wait_ctrl blocking assignments
+    // are cleanly contained and not mixed with non-blocking DUT drives.
+    // WF-FIX-1/2/5 all applied here.
+    // =========================================================================
+    task automatic wait_write_task(input [31:0] addr, input [31:0] data,
+                                   input int    hold_cycles);
+        // WF-FIX-2: raise wait_ctrl BETWEEN clock edges (blocking, #1 guard)
+        @(posedge HCLK); #1;
+        wait_ctrl = 1'b1;              // blocking = so slave sees it immediately
+
+        // Now start the transfer — slave will hold HREADY=0
+        @(posedge HCLK);
+        addr_in      <= addr;
+        wdata_in     <= data;
+        write_en     <= 1'b1;
+        hsize_in     <= 3'b010;
+        burst_en     <= 1'b0;
+        transfer_req <= 1'b1;
+
+        // Hold wait state for requested number of cycles
+        repeat(hold_cycles) @(posedge HCLK);
+
+        // WF-FIX-5: release wait_ctrl between edges so slave sees HREADY=1
+        #1; wait_ctrl = 1'b0;
+
+        // Now wait for master FSM to complete
+        @(posedge HCLK);
+        while (!transfer_done && !error_flag) @(posedge HCLK);
+
+        captured_error = error_flag;
+        transfer_req  <= 1'b0;
+        write_en      <= 1'b0;
+        @(posedge HCLK);
+
+        if (!captured_error)
+            $display("    WAIT-WRITE PASS  addr=0x%08h  (hold=%0d clocks in waveform)",
+                     addr, hold_cycles);
+        else
+            $display("    WAIT-WRITE ERROR  addr=0x%08h  unexpected HRESP=1  FAIL", addr);
+    endtask
+
+    // =========================================================================
+    // TASK : wait_read_task
+    // WF-FIX-1/2/4/5 applied.
+    // =========================================================================
+    task automatic wait_read_task(input [31:0] addr, input int hold_cycles);
+        @(posedge HCLK); #1;
+        wait_ctrl = 1'b1;              // WF-FIX-2
+
+        @(posedge HCLK);
+        addr_in      <= addr;
+        write_en     <= 1'b0;
+        hsize_in     <= 3'b010;
+        burst_en     <= 1'b0;
+        transfer_req <= 1'b1;
+
+        repeat(hold_cycles) @(posedge HCLK);
+
+        #1; wait_ctrl = 1'b0;          // WF-FIX-5
+
+        @(posedge HCLK);
+        while (!transfer_done && !error_flag) @(posedge HCLK);
+
+        captured_error = error_flag;
+        transfer_req  <= 1'b0;
+        @(posedge HCLK);               // FIX-7
+
+        if (!captured_error)
+            $display("    WAIT-READ  PASS  addr=0x%08h  rdata=0x%08h  (hold=%0d clocks)",
+                     addr, rdata_out, hold_cycles);
+        else
+            $display("    WAIT-READ  ERROR addr=0x%08h  unexpected HRESP=1  FAIL", addr);
+    endtask
+
+    // =========================================================================
+    // TASK : burst_write_task
+    // =========================================================================
+    task automatic burst_write_task(
+        input [31:0] base_addr,
+        input [31:0] seed_data,
+        input [4:0]  beats,
+        input [2:0]  btype
+    );
+        @(posedge HCLK);
+        addr_in        <= base_addr;
+        wdata_in       <= seed_data;
+        write_en       <= 1'b1;
+        hsize_in       <= 3'b010;
+        burst_en       <= 1'b1;
+        burst_type_in  <= btype;
+        burst_beats_in <= beats;
+        transfer_req   <= 1'b1;
+
+        @(posedge HCLK);
+        while (!transfer_done && !error_flag) @(posedge HCLK);
+
+        captured_error = error_flag;
+        transfer_req  <= 1'b0;
+        write_en      <= 1'b0;
+        burst_en      <= 1'b0;
+        @(posedge HCLK);
+
+        if (!captured_error)
+            $display("    BURST WRITE PASS  base=0x%08h  beats=%0d  btype=3'b%3b",
+                     base_addr, beats, btype);
+        else
+            $display("    BURST WRITE ERROR base=0x%08h", base_addr);
+    endtask
+
+    // =========================================================================
+    // TASK : burst_read_task
+    // =========================================================================
+    task automatic burst_read_task(
+        input [31:0] base_addr,
+        input [4:0]  beats,
+        input [2:0]  btype
+    );
+        @(posedge HCLK);
+        addr_in        <= base_addr;
+        write_en       <= 1'b0;
+        hsize_in       <= 3'b010;
+        burst_en       <= 1'b1;
+        burst_type_in  <= btype;
+        burst_beats_in <= beats;
+        transfer_req   <= 1'b1;
+
+        @(posedge HCLK);
+        while (!transfer_done && !error_flag) @(posedge HCLK);
+
+        captured_error = error_flag;
+        transfer_req  <= 1'b0;
+        burst_en      <= 1'b0;
+        @(posedge HCLK);
+
+        if (!captured_error)
+            $display("    BURST READ  PASS  base=0x%08h  beats=%0d  last_rdata=0x%08h",
+                     base_addr, beats, rdata_out);
+        else
+            $display("    BURST READ  ERROR base=0x%08h", base_addr);
+    endtask
+
+    // =========================================================================
+    // MAIN TEST SEQUENCE
+    // =========================================================================
+    initial begin
+
+        HCLK           = 1'b0;
+        HRESETn        = 1'b0;
+        transfer_req   = 1'b0;
+        write_en       = 1'b0;
+        addr_in        = 32'h0;
+        wdata_in       = 32'h0;
+        hsize_in       = 3'b010;
+        burst_en       = 1'b0;
+        burst_type_in  = 3'b0;
+        burst_beats_in = 5'b0;
+        captured_error = 1'b0;
+        wait_ctrl      = 1'b0;        // WF-FIX-1: blocking init
+
+        // FIX-9: long reset
+        repeat(6) @(posedge HCLK);
+        HRESETn = 1'b1;
+        repeat(3) @(posedge HCLK);
+
+        // ====================================================================
+        // S1 — SINGLE WRITE  (valid writable address)
+        // Exercises: ST_IDLE→ST_SINGLE_ADDR→ST_SINGLE_DATA; slave write path
+        // Expected : WRITE PASS, HREADY=1, HRESP=0
+        // Waveform : HADDR=0x20, HWDATA=0xA5A5A5A5, HWRITE=1, transfer_done=1
+        // ====================================================================
+        $display("\n--- S1  SINGLE WRITE  addr=0x20  data=0xA5A5A5A5 ---");
+        single_write(32'h00000020, 32'hA5A5A5A5);
+        repeat(3) @(posedge HCLK);
+
+        // ====================================================================
+        // S2 — SINGLE READ + DATA-MATCH
+        // Exercises: master read path; rdata_out latched after HREADY
+        // Expected : READ PASS, rdata=0xA5A5A5A5
+        // Waveform : HADDR=0x20, HWRITE=0, HRDATA=0xA5A5A5A5, rdata_out=same
+        // ====================================================================
+        $display("\n--- S2  SINGLE READ + DATA-MATCH  addr=0x20 ---");
+        single_read(32'h00000020);
+        if (rdata_out == 32'hA5A5A5A5)
+            $display("    DATA MATCH   rdata=0x%08h  PASS", rdata_out);
+        else
+            $display("    DATA MISMATCH rdata=0x%08h  expected=0xA5A5A5A5  FAIL", rdata_out);
+        repeat(3) @(posedge HCLK);
+
+        // ====================================================================
+        // S3 — WRITE TO READ-ONLY ADDRESS  → HRESP=1
+        // Exercises: slave read-only range check (HADDR 10'h000–10'h003);
+        //            HRESP=1 → master error_flag → ST_ERROR → ST_IDLE
+        // Expected : WRITE ERROR, error_flag pulse, captured_error=1
+        // Waveform : HRESP=1 briefly, HREADY=1, error_flag=1 one cycle
+        // ====================================================================
+        $display("\n--- S3  READ-ONLY WRITE  addr=0x02  data=0x12345678 ---");
+        single_write(32'h00000002, 32'h12345678);
+        if (captured_error)
+            $display("    READ-ONLY PROTECTION  PASS");
+        else
+            $display("    READ-ONLY PROTECTION  no error seen  FAIL");
+        repeat(3) @(posedge HCLK);
+
+        // ====================================================================
+        // S4 — OUT-OF-RANGE WRITE  → default-slave HRESP=1
+        // Exercises: AHBSlaveTop comb block (HADDR >= 0x800);
+        //            HRESP=1 driven combinationally, HREADY=0 one cycle
+        // WF-FIX-3: the error_flag is captured inside single_write after the
+        //           while-loop, which waits for error_flag itself — so this
+        //           is self-correcting. The fix was to verify the slave's
+        //           always_comb fires correctly with NON_SEQ HTRANS.
+        // Expected : WRITE ERROR, captured_error=1
+        // Waveform : HADDR=0xC00, HRESP=1 one cycle, HREADY=0 then 1
+        // ====================================================================
+        $display("\n--- S4  OUT-OF-RANGE WRITE  addr=0xC00 ---");
+        single_write(32'h00000C00, 32'hCAFEBABE);
+        if (captured_error)
+            $display("    DEFAULT SLAVE ERROR  PASS");
+        else
+            $display("    DEFAULT SLAVE ERROR  not detected  FAIL");
+        repeat(5) @(posedge HCLK);
+
+        // ====================================================================
+        // S5 — SINGLE WRITE WITH WAIT STATE  (HREADY held low)
+        // Exercises: wait_slave_to_master=1 → slave holds HREADY=0 until
+        //            wait_ctrl de-asserted; master stalls in ST_SINGLE_DATA
+        // WF-FIX-1/2: wait_ctrl driven with blocking = and #1 guard
+        // WF-FIX-5  : wait_ctrl released with #1 guard before FSM check
+        // Expected : WRITE PASS after 4-cycle HREADY=0 stall
+        // Waveform : HREADY=0 for 4 cycles, then 1; transfer_done after stall
+        // ====================================================================
+        $display("\n--- S5  SINGLE WRITE WITH WAIT STATE  addr=0x30 ---");
+        wait_write_task(.addr(32'h00000030), .data(32'hFACEB00C), .hold_cycles(4));
+        repeat(3) @(posedge HCLK);
+
+        // ====================================================================
+        // S6 — SINGLE READ WITH WAIT STATE  (HREADY held low)
+        // Exercises: same wait mechanism on a read; master must not latch
+        //            HRDATA until HREADY=1
+        // WF-FIX-4: 5-clock gap after pre-write before wait-state read so
+        //           MemoryArray[0x40] is committed and HRDATA is not X
+        // Expected : READ PASS, rdata=0x600DF00D
+        // Waveform : HREADY=0 for 4 cycles; HRDATA stable after HREADY=1
+        // ====================================================================
+        $display("\n--- S6  SINGLE READ  WITH WAIT STATE  addr=0x40 ---");
+
+        // Pre-load 0x40 WITHOUT wait state; WF-FIX-4: generous gap after
+        single_write(32'h00000040, 32'h600DF00D);
+        repeat(5) @(posedge HCLK);    // WF-FIX-4: let write fully commit
+
+        wait_read_task(.addr(32'h00000040), .hold_cycles(4));
+        if (!captured_error) begin
+            if (rdata_out == 32'h600DF00D)
+                $display("    DATA MATCH  rdata=0x%08h  PASS", rdata_out);
+            else
+                $display("    DATA MISMATCH rdata=0x%08h  expected=0x600DF00D  FAIL",
+                         rdata_out);
+        end
+        repeat(3) @(posedge HCLK);
+
+        // ====================================================================
+        // S7 — 4-BEAT BURST WRITE  (INCR4, busy=0)
+        // Exercises: HBURST=3'b011; beat_count 4→3→2→1; ST_BURST_LAST on
+        //            final beat; FIX-BUG-18 last_hwdata_reg valid
+        // Expected : BURST WRITE PASS, HBURST=3'b011 in waveform
+        // Waveform : 4 HTRANS=SEQ cycles after NON_SEQ, then IDLE
+        // ====================================================================
+        $display("\n--- S7  4-BEAT BURST WRITE  base=0x200  INCR4 ---");
+        burst_write_task(
+            .base_addr (32'h00000200),
+            .seed_data (32'hABCD1234),
+            .beats     (5'd4),
+            .btype     (3'b011)
+        );
+        repeat(5) @(posedge HCLK);
+
+        // ====================================================================
+        // S8 — 8-BEAT BURST WRITE  (INCR8, busy=0)
+        // Exercises: HBURST=3'b101; 6 ST_BURST_DATA cycles + ST_BURST_LAST
+        // Expected : BURST WRITE PASS
+        // Waveform : 8 HTRANS transitions, HBURST=3'b101
+        // ====================================================================
+        $display("\n--- S8  8-BEAT BURST WRITE  base=0x240  INCR8 ---");
+        burst_write_task(
+            .base_addr (32'h00000240),
+            .seed_data (32'h55AA55AA),
+            .beats     (5'd8),
+            .btype     (3'b101)
+        );
+        repeat(5) @(posedge HCLK);
+
+        // ====================================================================
+        // S9 — 16-BEAT BURST WRITE  (INCR16, busy=0)
+        // Exercises: HBURST=3'b111; 14 ST_BURST_DATA + ST_BURST_LAST
+        //            16 beats×4 B=0x40 → 0x280–0x2BF (inside Slave 0)
+        // Expected : BURST WRITE PASS
+        // Waveform : longest burst; 16 HTRANS=NON_SEQ/SEQ transitions
+        // ====================================================================
+        $display("\n--- S9  16-BEAT BURST WRITE base=0x280  INCR16 ---");
+        burst_write_task(
+            .base_addr (32'h00000280),
+            .seed_data (32'hDEADBEEF),
+            .beats     (5'd16),
+            .btype     (3'b111)
+        );
+        repeat(5) @(posedge HCLK);
+
+        // ====================================================================
+        // S10 — 4-BEAT BURST READ  (reads back S7 data)
+        // Exercises: master burst read FSM; rdata_out = last beat's HRDATA
+        //            S7 wrote 0xABCD1234 to all 4 locations (single seed)
+        // Expected : BURST READ PASS, last_rdata=0xABCD1234
+        // Waveform : HWRITE=0, 4 HRDATA transitions, HBURST=3'b011
+        // ====================================================================
+        $display("\n--- S10 4-BEAT BURST READ   base=0x200  INCR4 ---");
+        burst_read_task(
+            .base_addr (32'h00000200),
+            .beats     (5'd4),
+            .btype     (3'b011)
+        );
+        if (rdata_out == 32'hABCD1234)
+            $display("    BURST RD-BACK MATCH  rdata=0x%08h  PASS", rdata_out);
+        else
+            $display("    BURST RD-BACK MISMATCH rdata=0x%08h  expected=0xABCD1234  FAIL",
+                     rdata_out);
+        repeat(5) @(posedge HCLK);
+
+        // ====================================================================
+        // S11 — 8-BEAT BURST READ  (reads back S8 data)
+        // Exercises: HBURST=3'b101; 8-beat read FSM; S8 wrote 0x55AA55AA
+        // Expected : BURST READ PASS, last_rdata=0x55AA55AA
+        // Waveform : 8 HRDATA transitions, HBURST=3'b101
+        // ====================================================================
+        $display("\n--- S11 8-BEAT BURST READ   base=0x240  INCR8 ---");
+        burst_read_task(
+            .base_addr (32'h00000240),
+            .beats     (5'd8),
+            .btype     (3'b101)
+        );
+        if (rdata_out == 32'h55AA55AA)
+            $display("    BURST RD-BACK MATCH  rdata=0x%08h  PASS", rdata_out);
+        else
+            $display("    BURST RD-BACK MISMATCH rdata=0x%08h  expected=0x55AA55AA  FAIL",
+                     rdata_out);
+        repeat(5) @(posedge HCLK);
+
+        // ====================================================================
+        // S12 — BACK-TO-BACK WRITES THEN READS
+        // Exercises: master returns to ST_IDLE cleanly between consecutive
+        //            transfers; no address/data pipeline leakage
+        // Expected : read[0x100]=0xCAFE1111, read[0x104]=0xCAFE2222
+        // Waveform : two consecutive HADDR/HWDATA bursts, no IDLE gap
+        // ====================================================================
+        $display("\n--- S12 BACK-TO-BACK WRITE/READ  addr=0x100 & 0x104 ---");
+        single_write(32'h00000100, 32'hCAFE1111);
+        single_write(32'h00000104, 32'hCAFE2222);
+        repeat(3) @(posedge HCLK);
+
+        single_read(32'h00000100);
+        if (rdata_out == 32'hCAFE1111)
+            $display("    B2B [0x100]  rdata=0x%08h  PASS", rdata_out);
+        else
+            $display("    B2B [0x100]  rdata=0x%08h  expected=0xCAFE1111  FAIL", rdata_out);
+
+        single_read(32'h00000104);
+        if (rdata_out == 32'hCAFE2222)
+            $display("    B2B [0x104]  rdata=0x%08h  PASS", rdata_out);
+        else
+            $display("    B2B [0x104]  rdata=0x%08h  expected=0xCAFE2222  FAIL", rdata_out);
+        repeat(3) @(posedge HCLK);
+
+        // ====================================================================
+        // S13 — SLAVE SELECTION + CROSS-SLAVE ISOLATION
+        // Exercises: decoder decode_address=HADDR[10];
+        //            0→HSEL[0] Slave 0 (0x000–0x3FF)
+        //            1→HSEL[1] Slave 1 (0x400–0x7FF)
+        //            HRDATA_BUS mux selects correct slave output
+        // Expected : Slave0 rdata=0xDEAD0001, Slave1 rdata=0xBEEF0002
+        // Waveform : HSEL toggles between transfers; no HRDATA cross-talk
+        // ====================================================================
+        $display("\n--- S13 SLAVE SELECTION + ISOLATION  Slave0=0x080  Slave1=0x480 ---");
+
+        single_write(32'h00000080, 32'hDEAD0001);
+        repeat(3) @(posedge HCLK);
+        single_write(32'h00000480, 32'hBEEF0002);
+        repeat(3) @(posedge HCLK);
+
+        single_read(32'h00000080);
+        if (rdata_out == 32'hDEAD0001)
+            $display("    SLAVE 0  rdata=0x%08h  PASS", rdata_out);
+        else
+            $display("    SLAVE 0  rdata=0x%08h  expected=0xDEAD0001  FAIL", rdata_out);
+        repeat(3) @(posedge HCLK);
+
+        single_read(32'h00000480);
+        if (rdata_out == 32'hBEEF0002)
+            $display("    SLAVE 1  rdata=0x%08h  PASS", rdata_out);
+        else
+            $display("    SLAVE 1  rdata=0x%08h  expected=0xBEEF0002  FAIL", rdata_out);
+        repeat(5) @(posedge HCLK);
+
+        $display("\n=== ALL 13 SCENARIOS COMPLETE ===");
+        $finish;
+    end
+
+    // -----------------------------------------------------------------------
+    // Watchdog
+    // -----------------------------------------------------------------------
+    initial begin
+        #500000;
+        $display("WATCHDOG TIMEOUT — simulation exceeded 500 us");
+        $finish;
+    end
+
+endmodule
+Final waveform
+
+
+
+S14-S20 CODE
+// ============================================================
+// UNIFIED AHB-LITE TESTBENCH — ALL 7 SCENARIOS
+// Target  : Aldec Riviera-PRO 2025.04 / EDA Playground
+// Left    : design.sv
+// Right   : this file
+// Compile : -timescale 1ns/1ns  -sv2k9
+// Run     : +access+r
+//
+// FIXES vs previous versions
+//   FIX-A  `timescale is a file-scope directive — placed ONCE at the
+//           very top, never inside or between modules.
+//   FIX-B  All 7 scenarios merged into ONE module (tb) with one DUT.
+//           Riviera rejects multiple top-level modules in a single file
+//           when they each declare the same DUT instance name.
+//   FIX-C  NONSEQ renamed to NON_SEQ to match definesPkg parameter.
+//   FIX-D  SINGLE renamed to 3'b000 (SINGLE is not in definesPkg).
+//   FIX-E  settle() task added — repeat(3) @(posedge HCLK) — between
+//           every write and read-back so MemoryArray pipeline commits.
+//   FIX-F  T1 HRDATA sampling gated on HREADY=1.
+//   FIX-G  T4 HRESP sampled ONE cycle before HTRANS returns to IDLE
+//           so the always_comb OOR mux is still presenting the error.
+//   FIX-H  T4 recovery uses unique address 0x50 (not 0x10) to avoid
+//           reading stale data left by T2.
+//   FIX-I  T7 error injection: write goes to read-only address 0x02
+//           (not 0x10) so HRESP=1 fires from the slave's RO check.
+// ============================================================
+`timescale 1ns/1ns
+
+module tb;
+
+    import definesPkg::*;
+
+    // --------------------------------------------------------
+    // CLOCK + RESET
+    // --------------------------------------------------------
+    logic        HCLK;
+    logic        HRESETn;
+    logic        wait_ctrl;
+
+    int          pass_count;
+    int          fail_count;
+
+    initial      HCLK = 1'b0;
+    always  #5   HCLK = ~HCLK;
+
+    // --------------------------------------------------------
+    // INTERFACE + DUT  (single instance shared by all tests)
+    // --------------------------------------------------------
+    AHBInterface BUS (.HCLK(HCLK), .HRESETn(HRESETn));
+
+    AHBSlaveTop DUT (
+        .SlaveInterface      (BUS),
+        .wait_slave_to_master(wait_ctrl)
+    );
+
+    // --------------------------------------------------------
+    // VCD DUMP
+    // --------------------------------------------------------
+    initial begin
+        $dumpfile("unified_7scenarios.vcd");
+        $dumpvars(0, tb);
+    end
+
+    // --------------------------------------------------------
+    // TASK : vi_check
+    //   Self-checking pass/fail printer.
+    // --------------------------------------------------------
+    task automatic vi_check(
+        input string  label,
+        input logic   cond,
+        input string  pass_msg,
+        input string  fail_msg
+    );
+        if (cond) begin
+            $display("  [PASS] %-40s %s", label, pass_msg);
+            pass_count++;
+        end else begin
+            $display("  [FAIL] %-40s %s", label, fail_msg);
+            fail_count++;
+        end
+    endtask
+
+    // --------------------------------------------------------
+    // TASK : do_reset
+    //   Hard reset — drives every bus signal, holds 5 cycles,
+    //   2-cycle post-reset settle.
+    // --------------------------------------------------------
+    task automatic do_reset();
+        HRESETn      = 1'b0;
+        BUS.HADDR    = 32'h0;
+        BUS.HWRITE   = 1'b0;
+        BUS.HTRANS   = IDLE;
+        BUS.HWDATA   = 32'h0;
+        BUS.HSIZE    = 3'b010;
+        BUS.HBURST   = 3'b000;
+        wait_ctrl    = 1'b0;
+        repeat(5) @(posedge HCLK);
+        HRESETn = 1'b1;
+        repeat(2) @(posedge HCLK);
+    endtask
+
+    // --------------------------------------------------------
+    // TASK : settle
+    //   3-cycle gap so slave always_ff commits MemoryArray write
+    //   into registered HRDATA before the next read samples it.
+    // --------------------------------------------------------
+    task automatic settle();
+        repeat(3) @(posedge HCLK);
+    endtask
+
+    // --------------------------------------------------------
+    // SHARED SIGNALS
+    // --------------------------------------------------------
+    logic [31:0] rdata, rdata1, rdata2;
+
+    // ========================================================
+    // MAIN TEST SEQUENCE
+    // ========================================================
+    initial begin
+
+        pass_count = 0;
+        fail_count = 0;
+
+        $display("==========================================================");
+        $display("  AHB-LITE UNIFIED TESTBENCH — 7 SCENARIOS");
+        $display("==========================================================");
+
+        // ======================================================
+        // T1 — BACK-TO-BACK READ
+        //   Pre-load 0x10 and 0x14, then issue NON_SEQ→SEQ with
+        //   no IDLE between them.  HRDATA sampled when HREADY=1.
+        // ======================================================
+        $display("\n===== T1  BACK-TO-BACK READ =====");
+        do_reset();
+
+        // Pre-load both locations (settle between each)
+        BUS.write(32'h10, 32'h1111_1111);
+        settle();
+        BUS.write(32'h14, 32'h2222_2222);
+        settle();
+
+        // Address phase — NON_SEQ on 0x10
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h10;
+        BUS.HWRITE <= 1'b0;
+        BUS.HTRANS <= NON_SEQ;
+        BUS.HSIZE  <= 3'b010;
+
+        // Pipeline — SEQ on 0x14 (no IDLE)
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h14;
+        BUS.HTRANS <= SEQ;
+
+        // FIX-F: wait for HREADY before sampling rdata1
+        @(posedge HCLK);
+        while (!BUS.HREADY) @(posedge HCLK);
+        rdata1 = BUS.HRDATA;
+
+        // FIX-F: wait for HREADY before sampling rdata2
+        @(posedge HCLK);
+        while (!BUS.HREADY) @(posedge HCLK);
+        rdata2 = BUS.HRDATA;
+
+        BUS.HTRANS <= IDLE;
+        BUS.HWRITE <= 1'b0;
+
+        $display("  rdata1 = %h  rdata2 = %h", rdata1, rdata2);
+
+        vi_check("T1_rdata1_0x10",
+                 rdata1 == 32'h1111_1111,
+                 "rdata1=0x11111111 PASS",
+                 $sformatf("rdata1=0x%08h expected 0x11111111 FAIL", rdata1));
+
+        vi_check("T1_rdata2_0x14",
+                 rdata2 == 32'h2222_2222,
+                 "rdata2=0x22222222 PASS",
+                 $sformatf("rdata2=0x%08h expected 0x22222222 FAIL", rdata2));
+
+        vi_check("T1_no_error",
+                 BUS.HRESP == 1'b0,
+                 "HRESP=0 PASS",
+                 "HRESP=1 unexpected FAIL");
+
+        settle();
+
+        // ======================================================
+        // T2 — BACK-TO-BACK WRITE
+        //   NON_SEQ→SEQ write, then read-back to verify both
+        //   addresses were written correctly.
+        // ======================================================
+        $display("\n===== T2  BACK-TO-BACK WRITE =====");
+        do_reset();
+
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h10;
+        BUS.HWRITE <= 1'b1;
+        BUS.HTRANS <= NON_SEQ;
+        BUS.HSIZE  <= 3'b010;
+
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h14;
+        BUS.HTRANS <= SEQ;
+        BUS.HWDATA <= 32'hAAAA_AAAA;   // data phase for 0x10
+
+        @(posedge HCLK);
+        BUS.HWDATA <= 32'hBBBB_BBBB;   // data phase for 0x14
+
+        @(posedge HCLK);
+        BUS.HTRANS <= IDLE;
+        BUS.HWRITE <= 1'b0;
+
+        settle();   // FIX-E: let both MemoryArray writes commit
+
+        BUS.read(32'h10, rdata1);
+        settle();
+        BUS.read(32'h14, rdata2);
+        settle();
+
+        $display("  Addr 0x10 = %h  Addr 0x14 = %h", rdata1, rdata2);
+
+        vi_check("T2_write_0x10",
+                 rdata1 == 32'hAAAA_AAAA,
+                 "0x10=0xAAAAAAAA PASS",
+                 $sformatf("0x10=0x%08h expected 0xAAAAAAAA FAIL", rdata1));
+
+        vi_check("T2_write_0x14",
+                 rdata2 == 32'hBBBB_BBBB,
+                 "0x14=0xBBBBBBBB PASS",
+                 $sformatf("0x14=0x%08h expected 0xBBBBBBBB FAIL", rdata2));
+
+        vi_check("T2_no_error",
+                 BUS.HRESP == 1'b0,
+                 "HRESP=0 PASS",
+                 "HRESP=1 unexpected FAIL");
+
+        settle();
+
+        // ======================================================
+        // T3 — DATA INTEGRITY  (single write → read → verify)
+        // ======================================================
+        $display("\n===== T3  DATA INTEGRITY =====");
+        do_reset();
+
+        BUS.write(32'h00000010, 32'hDEAD_BEEF);
+        settle();   // FIX-E
+        BUS.read (32'h00000010, rdata);
+        settle();
+
+        $display("  Read Data = %h", rdata);
+
+        vi_check("T3_data_integrity",
+                 rdata === 32'hDEAD_BEEF,
+                 "rdata=0xDEADBEEF PASS",
+                 $sformatf("rdata=0x%08h expected 0xDEADBEEF FAIL", rdata));
+
+        vi_check("T3_no_error",
+                 BUS.HRESP == 1'b0,
+                 "HRESP=0 PASS",
+                 "HRESP=1 unexpected FAIL");
+
+        settle();
+
+        // ======================================================
+        // T4 — NO SLAVE SELECTED (out-of-range → default error)
+        //   OOR addresses >= 0x800 hit the always_comb mux in
+        //   AHBSlaveTop which drives HRESP=1 combinationally.
+        //   FIX-G: HRESP is checked ONE cycle BEFORE HTRANS goes
+        //   back to IDLE so the OOR address is still on the bus.
+        //   FIX-H: recovery uses unique address 0x50.
+        // ======================================================
+        $display("\n===== T4  NO SLAVE SELECTED (OOR) =====");
+        do_reset();
+
+        // Sub-test A: OOR READ at 0x800
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h0000_0800;
+        BUS.HWRITE <= 1'b0;
+        BUS.HTRANS <= NON_SEQ;
+        BUS.HSIZE  <= 3'b010;
+
+        // FIX-G: sample HRESP here, while OOR address still on bus
+        @(posedge HCLK);
+        vi_check("T4_OOR_read_HRESP",
+                 BUS.HRESP == 1'b1,
+                 "OOR READ HRESP=1 PASS",
+                 "OOR READ HRESP not 1 FAIL");
+
+        // Now return to IDLE
+        BUS.HTRANS <= IDLE;
+
+        @(posedge HCLK);
+        vi_check("T4_OOR_read_HREADY",
+                 BUS.HREADY == 1'b1,
+                 "OOR READ HREADY=1 PASS",
+                 "OOR READ HREADY not 1 FAIL");
+
+        $display("  OOR READ  HRESP=%0b HREADY=%0b HRDATA=%h",
+                 BUS.HRESP, BUS.HREADY, BUS.HRDATA);
+
+        settle();
+
+        // Sub-test B: OOR WRITE at 0x1000
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h0000_1000;
+        BUS.HWRITE <= 1'b1;
+        BUS.HTRANS <= NON_SEQ;
+        BUS.HWDATA <= 32'hAAAA_BBBB;
+
+        // FIX-G: sample HRESP before returning HTRANS to IDLE
+        @(posedge HCLK);
+        vi_check("T4_OOR_write_HRESP",
+                 BUS.HRESP == 1'b1,
+                 "OOR WRITE HRESP=1 PASS",
+                 "OOR WRITE HRESP not 1 FAIL");
+
+        BUS.HTRANS <= IDLE;
+        BUS.HWRITE <= 1'b0;
+
+        @(posedge HCLK);
+        vi_check("T4_OOR_write_HREADY",
+                 BUS.HREADY == 1'b1,
+                 "OOR WRITE HREADY=1 PASS",
+                 "OOR WRITE HREADY not 1 FAIL");
+
+        $display("  OOR WRITE HRESP=%0b HREADY=%0b",
+                 BUS.HRESP, BUS.HREADY);
+
+        settle();
+
+        // Sub-test C: recovery at unique address 0x50 (FIX-H)
+        $display("  Checking recovery...");
+        BUS.write(32'h0000_0050, 32'h1234_5678);
+        settle();   // FIX-E
+        BUS.read (32'h0000_0050, rdata);
+        settle();
+
+        vi_check("T4_recovery",
+                 rdata === 32'h1234_5678,
+                 "Recovery rdata=0x12345678 PASS",
+                 $sformatf("Recovery rdata=0x%08h expected 0x12345678 FAIL", rdata));
+
+        $display("  Read back = %h", rdata);
+        settle();
+
+        // ======================================================
+        // T5 — SLAVE 1 ACCESS  (address 0x400–0x7FF)
+        //   Decoder bit HADDR[10]=1 → HSEL[1].
+        // ======================================================
+        $display("\n===== T5  SLAVE 1 ACCESS =====");
+        do_reset();
+
+        BUS.write(32'h0000_0400, 32'hABCD_1234);
+        settle();   // FIX-E
+        BUS.read (32'h0000_0400, rdata);
+        settle();
+
+        $display("  Read Data = %h", rdata);
+
+        vi_check("T5_slave1_data",
+                 rdata === 32'hABCD_1234,
+                 "Slave1 rdata=0xABCD1234 PASS",
+                 $sformatf("Slave1 rdata=0x%08h expected 0xABCD1234 FAIL", rdata));
+
+        vi_check("T5_no_error",
+                 BUS.HRESP == 1'b0,
+                 "HRESP=0 PASS",
+                 "HRESP=1 unexpected FAIL");
+
+        settle();
+
+        // ======================================================
+        // T6 — SLAVE 0 ACCESS + ISOLATION
+        //   Decoder bit HADDR[10]=0 → HSEL[0].
+        //   Also reads Slave 1 address to confirm no cross-talk.
+        // ======================================================
+        $display("\n===== T6  SLAVE 0 ACCESS + ISOLATION =====");
+        do_reset();
+
+        BUS.write(32'h0000_0010, 32'h1234_ABCD);
+        settle();   // FIX-E
+        BUS.read (32'h0000_0010, rdata);
+        settle();
+
+        $display("  Slave0 Read = %h", rdata);
+
+        vi_check("T6_slave0_data",
+                 rdata === 32'h1234_ABCD,
+                 "Slave0 rdata=0x1234ABCD PASS",
+                 $sformatf("Slave0 rdata=0x%08h expected 0x1234ABCD FAIL", rdata));
+
+        // Isolation: Slave 1 at 0x410 must not contain Slave 0 data
+        BUS.read(32'h0000_0410, rdata);
+        settle();
+
+        vi_check("T6_slave_isolation",
+                 rdata !== 32'h1234_ABCD,
+                 "Slave1 not polluted PASS",
+                 "Slave1 returned Slave0 data — cross-talk FAIL");
+
+        vi_check("T6_no_error",
+                 BUS.HRESP == 1'b0,
+                 "HRESP=0 PASS",
+                 "HRESP=1 unexpected FAIL");
+
+        settle();
+
+        // ======================================================
+        // T7 — ERROR INJECTION
+        //   Step A: normal baseline write/read at 0x10.
+        //   Step B: write to READ-ONLY address 0x02 → HRESP=1.
+        //           FIX-I: address 0x02 is in RO range 0x00–0x03
+        //           so slave fires HRESP=1 natively, no ERROR_INJECT
+        //           macro needed.
+        //   Step C: read back 0x02 → must NOT equal 0xDEADBEEF.
+        //   Step D: HREADY must recover to 1 after error.
+        // ======================================================
+        $display("\n===== T7  ERROR INJECTION =====");
+        do_reset();
+
+        // Step A: baseline
+        BUS.write(32'h10, 32'hAAAA_BBBB);
+        settle();
+        BUS.read (32'h10, rdata);
+        settle();
+        $display("  Before inject: HRDATA = %h", rdata);
+
+        vi_check("T7_baseline_write",
+                 rdata === 32'hAAAA_BBBB,
+                 "Baseline rdata=0xAAAABBBB PASS",
+                 $sformatf("Baseline rdata=0x%08h FAIL", rdata));
+
+        // Step B: attempt write to read-only address 0x02
+        //   Address phase
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h0000_0002;
+        BUS.HWRITE <= 1'b1;
+        BUS.HTRANS <= NON_SEQ;
+        BUS.HSIZE  <= 3'b010;
+
+        //   FIX-G: sample HRESP while OOR/RO address still active
+        //   Data phase (HWDATA presented; slave ignores because RO)
+        @(posedge HCLK);
+        BUS.HWDATA <= 32'hDEAD_BEEF;
+        BUS.HTRANS <= IDLE;
+        BUS.HWRITE <= 1'b0;
+
+        @(posedge HCLK);   // slave always_ff fires HRESP here
+
+        vi_check("T7_RO_HRESP",
+                 BUS.HRESP == 1'b1,
+                 "RO write HRESP=1 PASS",
+                 "RO write HRESP not asserted FAIL");
+
+        $display("  RO write: HRESP=%0b HREADY=%0b", BUS.HRESP, BUS.HREADY);
+
+        settle();
+
+        // Step C: read back 0x02 — write must have been rejected
+        @(posedge HCLK);
+        BUS.HADDR  <= 32'h0000_0002;
+        BUS.HWRITE <= 1'b0;
+        BUS.HTRANS <= NON_SEQ;
+
+        @(posedge HCLK);
+        BUS.HTRANS <= IDLE;
+        while (!BUS.HREADY) @(posedge HCLK);
+        rdata = BUS.HRDATA;
+
+        vi_check("T7_RO_write_rejected",
+                 rdata !== 32'hDEAD_BEEF,
+                 "Write rejected HRDATA!=0xDEADBEEF PASS",
+                 $sformatf("Write NOT rejected rdata=0x%08h FAIL", rdata));
+
+        $display("  After inject: HRDATA = %h (must not be 0xDEADBEEF)", rdata);
+
+        // Step D: protocol recovery
+        repeat(2) @(posedge HCLK);
+        vi_check("T7_protocol_recovery",
+                 BUS.HREADY == 1'b1,
+                 "HREADY recovered to 1 PASS",
+                 "HREADY stuck at 0 after error FAIL");
+
+        settle();
+
+        // ======================================================
+        // FINAL REPORT
+        // ======================================================
+        $display("");
+        $display("==========================================================");
+        $display("  FINAL REPORT");
+        $display("==========================================================");
+        $display("  Scenarios : 7");
+        $display("  PASS      : %0d", pass_count);
+        $display("  FAIL      : %0d", fail_count);
+        $display("==========================================================");
+        if (fail_count == 0)
+            $display("  RESULT : ALL CHECKS PASSED");
+        else
+            $display("  RESULT : %0d FAILURE(S) — search log for [FAIL]", fail_count);
+        $display("==========================================================");
+
+        #20;
+        $finish;
+    end
+
+    // --------------------------------------------------------
+    // WATCHDOG
+    // --------------------------------------------------------
+    initial begin
+        #500_000;
+        $display("[WATCHDOG] Timeout at 500 us");
+        $finish;
+    end
+
+endmodule
