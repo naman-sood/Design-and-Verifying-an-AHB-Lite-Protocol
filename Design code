@@ -1,0 +1,640 @@
+///////////////////////////////////////////////////////////////////////////
+// Project  : Design and Verification of AMBA AHB-Lite Protocol
+// File     : design.sv
+// Authors  : Akshat Tripathi (23118016) & Naman Sood (23118044)
+// Guide    : Dr. Shruti Kalra, ECE Dept, JIIT Noida
+//
+// Merge notes:
+//   BASE    : Code 3 (clean decoder, correct default slave, pipelined write)
+//   ADDED   : HSIZE, HBURST signals and encodings
+//   ADDED   : wait_slave_to_master port
+//   ADDED   : Read-only address protection (0x000-0x003)
+//   ADDED   : ERROR_INJECT define support
+//   ADDED   : AHBMaster RTL with BUG-18 fix (last_hwdata_reg)
+//   ADDED   : Interface tasks (read/write/burst_read/burst_write)
+///////////////////////////////////////////////////////////////////////////
+
+
+///////////////////////////////////////////////////////////////////////////
+// MODULE 1 : Package
+///////////////////////////////////////////////////////////////////////////
+
+package definesPkg;
+
+    // Memory parameters
+    parameter ADDRESS_DEPTH           = 1024;
+    parameter READ_ONLY_START_ADDRESS = 10'h000;
+    parameter READ_ONLY_END_ADDRESS   = 10'h003;
+
+    // Bus width parameters
+    parameter ADDRESS_WIDTH = 32;
+    parameter DATA_WIDTH    = 32;
+    parameter HSIZE_WIDTH   = 3;
+    parameter BURST_SIZE    = 3;
+    parameter TRANSFER_TYPE = 2;
+
+    // HTRANS encodings
+    parameter IDLE   = 2'b00;
+    parameter BUSY   = 2'b01;
+    parameter NONSEQ = 2'b10;
+    parameter SEQ    = 2'b11;
+
+    // HBURST encodings
+    parameter SINGLE = 3'b000;
+    parameter INCR   = 3'b001;
+    parameter WRAP4  = 3'b010;
+    parameter INCR4  = 3'b011;
+    parameter WRAP8  = 3'b100;
+    parameter INCR8  = 3'b101;
+    parameter WRAP16 = 3'b110;
+    parameter INCR16 = 3'b111;
+
+    // HRESP encodings
+    parameter OKAY  = 1'b0;
+    parameter ERROR = 1'b1;
+
+endpackage
+
+
+///////////////////////////////////////////////////////////////////////////
+// MODULE 2 : Interface
+///////////////////////////////////////////////////////////////////////////
+
+import definesPkg::*;
+
+interface AHBInterface (input logic HCLK, input logic HRESETn);
+
+    import definesPkg::*;
+
+    //////////////////////////////////////////////// SIGNALS ///////////////
+
+    logic [ADDRESS_WIDTH-1:0]  HADDR;
+    logic                      HWRITE;
+    logic [HSIZE_WIDTH-1:0]    HSIZE;
+    logic [BURST_SIZE-1:0]     HBURST;
+    logic [TRANSFER_TYPE-1:0]  HTRANS;
+    logic [DATA_WIDTH-1:0]     HWDATA;
+    logic [DATA_WIDTH-1:0]     HRDATA;
+    logic                      HREADY;
+    logic                      HRESP;
+
+    //////////////////////////////////////////////// TASKS /////////////////
+
+    // -------------------------------------------------------------------
+    // Single Read
+    // -------------------------------------------------------------------
+    task read(input  bit   [ADDRESS_WIDTH-1:0] addr,
+              output logic [DATA_WIDTH-1:0]    data);
+        @(posedge HCLK);
+        HADDR  <= addr;
+        HWRITE <= 1'b0;
+        HSIZE  <= 3'b010;
+        HBURST <= SINGLE;
+        HTRANS <= NONSEQ;
+
+        @(posedge HCLK);
+        HTRANS <= IDLE;
+
+        @(posedge HCLK);
+        while (!HREADY) @(posedge HCLK);
+        data = HRDATA;
+
+        if (HRESP)
+            $display("[READ  TASK] ERROR RESPONSE from slave at addr=0x%08h", addr);
+    endtask
+
+
+    // -------------------------------------------------------------------
+    // Single Write
+    // -------------------------------------------------------------------
+    task write(input bit   [ADDRESS_WIDTH-1:0] addr,
+               input logic [DATA_WIDTH-1:0]    data);
+        @(posedge HCLK);
+        HADDR  <= addr;
+        HWRITE <= 1'b1;
+        HSIZE  <= 3'b010;
+        HBURST <= SINGLE;
+        HTRANS <= NONSEQ;
+        while (!HREADY) @(posedge HCLK);
+
+        @(posedge HCLK);
+        `ifndef ERROR_INJECT
+            HWDATA <= data;
+        `endif
+        HTRANS <= IDLE;
+        HWRITE <= 1'b0;
+
+        @(posedge HCLK);
+        if (HRESP)
+            $display("[WRITE TASK] ERROR â€” write to addr 0x%08h", addr);
+    endtask
+
+
+    // -------------------------------------------------------------------
+    // Burst Read
+    // -------------------------------------------------------------------
+    task burst_read(input  bit   [ADDRESS_WIDTH-1:0] addr,
+                    input  int                        BEATS,
+                    input  int                        busy,
+                    output logic [DATA_WIDTH-1:0]     data_burst[31:0]);
+        automatic int i = 0;
+        automatic int j = 0;
+
+        @(posedge HCLK);
+        HADDR  <= addr;
+        HTRANS <= NONSEQ;
+        HWRITE <= 1'b0;
+        HSIZE  <= 3'b010;
+        HBURST <= (BEATS == 4)  ? INCR4  :
+                  (BEATS == 8)  ? INCR8  :
+                  (BEATS == 16) ? INCR16 : INCR;
+
+        @(posedge HCLK);
+        `ifndef ERROR_INJECT
+            HADDR <= addr + 1;
+        `endif
+
+        repeat(busy) begin
+            j++;
+            HTRANS <= BUSY;
+            @(posedge HCLK);
+            if (j == busy) HTRANS <= SEQ;
+        end
+        if (busy == 0) HTRANS <= SEQ;
+
+        i = 0;
+        repeat(BEATS - 2) begin
+            @(posedge HCLK);
+            HADDR <= HADDR + 1;
+            `ifndef ERROR_INJECT
+                HTRANS <= SEQ;
+            `endif
+            while (!HREADY) @(posedge HCLK);
+            data_burst[i] = HRDATA;
+            i = i + 1;
+        end
+
+        @(posedge HCLK);
+        HTRANS <= IDLE;
+        while (!HREADY) @(posedge HCLK);
+        data_burst[i] = HRDATA;
+        i = i + 1;
+
+        @(posedge HCLK);
+        while (!HREADY) @(posedge HCLK);
+        data_burst[i] = HRDATA;
+    endtask
+
+
+    // -------------------------------------------------------------------
+    // Burst Write
+    // -------------------------------------------------------------------
+    task burst_write(input bit   [ADDRESS_WIDTH-1:0] addr,
+                     input int                        BEATS,
+                     input int                        busy,
+                     input logic [DATA_WIDTH-1:0]     data_arr[31:0]);
+
+        automatic int ai = 0;
+        automatic int di = 0;
+        automatic int bi = 0;
+        automatic bit [ADDRESS_WIDTH-1:0] cur_addr = addr;
+
+        if      (BEATS == 4)  HBURST <= INCR4;
+        else if (BEATS == 8)  HBURST <= INCR8;
+        else if (BEATS == 16) HBURST <= INCR16;
+        else                  HBURST <= INCR;
+
+        if (HRESP) $display("[BURST_WRITE] Unexpected HRESP at start");
+
+        fork
+            // Address phase thread
+            begin : addr_thread
+                repeat(BEATS) begin
+                    @(posedge HCLK);
+                    while (!HREADY) @(posedge HCLK);
+
+                    HADDR  <= cur_addr;
+                    `ifndef ERROR_INJECT
+                        HWRITE <= 1'b1;
+                    `endif
+
+                    HTRANS <= (ai == 0) ? NONSEQ : SEQ;
+
+                    cur_addr = cur_addr + 4;
+                    ai = ai + 1;
+
+                    if (busy >= 1 && ai == 2) begin
+                        HTRANS <= BUSY;
+                        @(posedge HCLK);
+                    end
+                    if (busy >= 2 && ai == 3) begin
+                        HTRANS <= BUSY;
+                        @(posedge HCLK);
+                        @(posedge HCLK);
+                    end
+                end
+                HTRANS <= IDLE;
+                HWRITE <= 1'b0;
+            end
+
+            // Data phase thread
+            begin : data_thread
+                @(posedge HCLK);
+                repeat(BEATS) begin
+                    while (!HREADY) @(posedge HCLK);
+                    HWDATA <= data_arr[di];
+                    di = di + 1;
+                    bi = bi + 1;
+
+                    if (busy >= 1 && bi == 2) @(posedge HCLK);
+                    if (busy >= 2 && bi == 3) begin
+                        @(posedge HCLK);
+                        @(posedge HCLK);
+                    end
+
+                    if (di < BEATS) @(posedge HCLK);
+                end
+            end
+        join
+    endtask
+
+
+    //////////////////////////////////////////////// MODPORTS //////////////
+
+    modport Slave (
+        output HRDATA, HREADY, HRESP,
+        input  HADDR, HWRITE, HSIZE, HBURST, HTRANS, HWDATA,
+        input  HCLK, HRESETn
+    );
+
+    modport Master (
+        output HADDR, HWRITE, HSIZE, HBURST, HTRANS, HWDATA,
+        input  HRDATA, HREADY, HRESP,
+        input  HCLK, HRESETn
+    );
+
+endinterface
+
+
+///////////////////////////////////////////////////////////////////////////
+// MODULE 3 : AHB Slave Memory
+///////////////////////////////////////////////////////////////////////////
+
+module AHBSlaveMemory (
+    input  logic        HCLK,
+    input  logic        HRESETn,
+    input  logic [9:0]  HADDR,
+    input  logic [31:0] HWDATA,
+    input  logic [1:0]  HTRANS,
+    input  logic        HWRITE,
+    input  logic        HSEL,
+    input  logic        wait_slave_to_master,
+
+    output logic [31:0] HRDATA,
+    output logic        HREADY,
+    output logic        HRESP
+);
+
+    import definesPkg::*;
+
+    logic [31:0] mem      [0:1023];
+    logic [9:0]  addr_reg;
+
+    always_ff @(posedge HCLK or negedge HRESETn) begin
+        if (!HRESETn) begin
+            HREADY   <= 1'b1;
+            HRESP    <= 1'b0;
+            HRDATA   <= '0;
+            addr_reg <= '0;
+            `ifdef ERROR_INJECT
+                HRESP <= 1'b1;
+            `endif
+        end
+        else if (HSEL) begin
+
+            if (HTRANS == IDLE || HTRANS == BUSY) begin
+                HREADY <= 1'b1;
+                HRESP  <= 1'b0;
+            end
+            else begin
+                if (wait_slave_to_master) begin
+                    HREADY <= 1'b0;
+                    HRESP  <= 1'b0;
+                end
+                else begin
+                    if (HWRITE) begin
+                        // Read-only region protection
+                        if (addr_reg >= READ_ONLY_START_ADDRESS &&
+                            addr_reg <= READ_ONLY_END_ADDRESS) begin
+                            HREADY <= 1'b1;
+                            `ifndef ERROR_INJECT
+                                HRESP <= 1'b1;
+                            `else
+                                HRESP <= 1'b0;
+                            `endif
+                        end
+                        else begin
+                            mem[addr_reg] <= HWDATA;   // pipelined write
+                            addr_reg      <= HADDR;
+                            `ifndef ERROR_INJECT
+                                HREADY <= 1'b1;
+                            `else
+                                HREADY <= 1'b0;
+                            `endif
+                            HRESP <= 1'b0;
+                        end
+                    end
+                    else begin
+                        addr_reg <= HADDR;
+                        HRDATA   <= mem[addr_reg];
+                        HREADY   <= 1'b1;
+                        HRESP    <= 1'b0;
+                    end
+                end
+            end
+        end
+        else begin
+            HREADY <= 1'b1;
+            HRESP  <= 1'b0;
+        end
+    end
+
+endmodule
+
+
+///////////////////////////////////////////////////////////////////////////
+// MODULE 4 : AHB Slave Top
+///////////////////////////////////////////////////////////////////////////
+
+module AHBSlaveTop (
+    AHBInterface SlaveInterface,
+    input logic  wait_slave_to_master
+);
+
+    import definesPkg::*;
+
+    logic [1:0]  HSEL;
+    logic [31:0] HRDATA_s0, HRDATA_s1;
+    logic        HREADY_s0, HREADY_s1;
+    logic        HRESP_s0,  HRESP_s1;
+
+    // Decoder â€” clean address range based (from Code 3)
+    always_comb begin
+        HSEL = 2'b00;
+        if      (SlaveInterface.HADDR < 32'd1024) HSEL = 2'b01;
+        else if (SlaveInterface.HADDR < 32'd2048) HSEL = 2'b10;
+        else                                      HSEL = 2'b00;
+    end
+
+    AHBSlaveMemory S0 (
+        .HCLK                 (SlaveInterface.HCLK),
+        .HRESETn              (SlaveInterface.HRESETn),
+        .HADDR                (SlaveInterface.HADDR[9:0]),
+        .HWDATA               (SlaveInterface.HWDATA),
+        .HTRANS               (SlaveInterface.HTRANS),
+        .HWRITE               (SlaveInterface.HWRITE),
+        .HSEL                 (HSEL[0]),
+        .wait_slave_to_master (wait_slave_to_master),
+        .HRDATA               (HRDATA_s0),
+        .HREADY               (HREADY_s0),
+        .HRESP                (HRESP_s0)
+    );
+
+    AHBSlaveMemory S1 (
+        .HCLK                 (SlaveInterface.HCLK),
+        .HRESETn              (SlaveInterface.HRESETn),
+        .HADDR                (SlaveInterface.HADDR[9:0]),
+        .HWDATA               (SlaveInterface.HWDATA),
+        .HTRANS               (SlaveInterface.HTRANS),
+        .HWRITE               (SlaveInterface.HWRITE),
+        .HSEL                 (HSEL[1]),
+        .wait_slave_to_master (wait_slave_to_master),
+        .HRDATA               (HRDATA_s1),
+        .HREADY               (HREADY_s1),
+        .HRESP                (HRESP_s1)
+    );
+
+    // Response mux + protocol-compliant default slave (from Code 3)
+    always_comb begin
+        if (HSEL == 2'b00) begin
+            SlaveInterface.HREADY = 1'b1;
+            SlaveInterface.HRESP  = 1'b1;
+            SlaveInterface.HRDATA = 32'hDEAD_BEEF;
+        end
+        else if (HSEL[0]) begin
+            SlaveInterface.HREADY = HREADY_s0;
+            SlaveInterface.HRESP  = HRESP_s0;
+            SlaveInterface.HRDATA = HRDATA_s0;
+        end
+        else begin
+            SlaveInterface.HREADY = HREADY_s1;
+            SlaveInterface.HRESP  = HRESP_s1;
+            SlaveInterface.HRDATA = HRDATA_s1;
+        end
+    end
+
+endmodule
+
+
+///////////////////////////////////////////////////////////////////////////
+// MODULE 5 : AHB Master (Synthesizable RTL)
+///////////////////////////////////////////////////////////////////////////
+
+module AHBMaster (
+    input  logic         HCLK,
+    input  logic         HRESETn,
+
+    input  logic         transfer_req,
+    input  logic         write_en,
+    input  logic [31:0]  addr_in,
+    input  logic [31:0]  wdata_in,
+    input  logic [2:0]   hsize_in,
+    input  logic         burst_en,
+    input  logic [2:0]   burst_type_in,
+    input  logic [4:0]   burst_beats_in,
+
+    output logic [31:0]  rdata_out,
+    output logic         transfer_done,
+    output logic         master_busy,
+    output logic         error_flag,
+
+    AHBInterface.Master  MasterInterface
+);
+
+    import definesPkg::*;
+
+    typedef enum logic [2:0] {
+        ST_IDLE        = 3'b000,
+        ST_SINGLE_ADDR = 3'b001,
+        ST_SINGLE_DATA = 3'b010,
+        ST_BURST_ADDR  = 3'b011,
+        ST_BURST_DATA  = 3'b100,
+        ST_BURST_LAST  = 3'b101,
+        ST_ERROR       = 3'b110
+    } state_t;
+
+    state_t current_state, next_state;
+
+    logic [31:0] haddr_reg;
+    logic [31:0] hwdata_reg;
+    logic [31:0] last_hwdata_reg;
+    logic        hwrite_reg;
+    logic [2:0]  hsize_reg;
+    logic [2:0]  hburst_reg;
+    logic [4:0]  beat_count;
+
+    always_ff @(posedge HCLK or negedge HRESETn) begin
+        if (!HRESETn) current_state <= ST_IDLE;
+        else          current_state <= next_state;
+    end
+
+    always_comb begin
+        next_state = current_state;
+        case (current_state)
+            ST_IDLE:
+                if (transfer_req)
+                    next_state = burst_en ? ST_BURST_ADDR : ST_SINGLE_ADDR;
+            ST_SINGLE_ADDR:
+                next_state = ST_SINGLE_DATA;
+            ST_SINGLE_DATA:
+                if      (MasterInterface.HRESP)  next_state = ST_ERROR;
+                else if (MasterInterface.HREADY) next_state = ST_IDLE;
+            ST_BURST_ADDR:
+                next_state = ST_BURST_DATA;
+            ST_BURST_DATA:
+                if      (MasterInterface.HRESP)                         next_state = ST_ERROR;
+                else if (MasterInterface.HREADY && beat_count == 5'd1)  next_state = ST_BURST_LAST;
+            ST_BURST_LAST:
+                if      (MasterInterface.HRESP)  next_state = ST_ERROR;
+                else if (MasterInterface.HREADY) next_state = ST_IDLE;
+            ST_ERROR:       next_state = ST_IDLE;
+            default:        next_state = ST_IDLE;
+        endcase
+    end
+
+    always_ff @(posedge HCLK or negedge HRESETn) begin
+        if (!HRESETn) begin
+            haddr_reg                  <= '0;
+            hwdata_reg                 <= '0;
+            last_hwdata_reg            <= '0;
+            hwrite_reg                 <= 1'b0;
+            hsize_reg                  <= 3'b010;
+            hburst_reg                 <= 3'b000;
+            beat_count                 <= 5'd0;
+            rdata_out                  <= '0;
+            transfer_done              <= 1'b0;
+            error_flag                 <= 1'b0;
+            MasterInterface.HADDR      <= '0;
+            MasterInterface.HWRITE     <= 1'b0;
+            MasterInterface.HSIZE      <= 3'b010;
+            MasterInterface.HBURST     <= 3'b000;
+            MasterInterface.HTRANS     <= IDLE;
+            MasterInterface.HWDATA     <= '0;
+        end
+        else begin
+            transfer_done <= 1'b0;
+            error_flag    <= 1'b0;
+
+            case (current_state)
+
+                ST_IDLE: begin
+                    MasterInterface.HTRANS <= IDLE;
+                    MasterInterface.HADDR  <= '0;
+                    MasterInterface.HWRITE <= 1'b0;
+                    if (transfer_req) begin
+                        haddr_reg       <= addr_in;
+                        hwrite_reg      <= write_en;
+                        hsize_reg       <= hsize_in;
+                        hwdata_reg      <= wdata_in;
+                        last_hwdata_reg <= wdata_in;
+                        if (burst_en) begin
+                            hburst_reg <= burst_type_in;
+                            beat_count <= burst_beats_in - 1;
+                        end else
+                            hburst_reg <= 3'b000;
+                    end
+                end
+
+                ST_SINGLE_ADDR: begin
+                    MasterInterface.HADDR  <= haddr_reg;
+                    MasterInterface.HWRITE <= hwrite_reg;
+                    MasterInterface.HSIZE  <= hsize_reg;
+                    MasterInterface.HBURST <= 3'b000;
+                    MasterInterface.HTRANS <= NONSEQ;
+                end
+
+                ST_SINGLE_DATA: begin
+                    if (hwrite_reg) MasterInterface.HWDATA <= hwdata_reg;
+                    if (MasterInterface.HREADY) begin
+                        if (!hwrite_reg) rdata_out <= MasterInterface.HRDATA;
+                        if (!MasterInterface.HRESP) begin
+                            transfer_done          <= 1'b1;
+                            MasterInterface.HTRANS <= IDLE;
+                        end
+                    end
+                    if (MasterInterface.HRESP) begin
+                        error_flag             <= 1'b1;
+                        MasterInterface.HTRANS <= IDLE;
+                    end
+                end
+
+                ST_BURST_ADDR: begin
+                    MasterInterface.HADDR  <= haddr_reg;
+                    MasterInterface.HWRITE <= hwrite_reg;
+                    MasterInterface.HSIZE  <= hsize_reg;
+                    MasterInterface.HBURST <= hburst_reg;
+                    MasterInterface.HTRANS <= NONSEQ;
+                end
+
+                ST_BURST_DATA: begin
+                    if (MasterInterface.HREADY) begin
+                        if (!hwrite_reg) rdata_out <= MasterInterface.HRDATA;
+                        if (beat_count > 5'd1) begin
+                            haddr_reg              <= haddr_reg + 4;
+                            MasterInterface.HADDR  <= haddr_reg + 4;
+                            MasterInterface.HTRANS <= SEQ;
+                            last_hwdata_reg        <= hwdata_reg;
+                            hwdata_reg             <= wdata_in;
+                            MasterInterface.HWDATA <= hwdata_reg;
+                            beat_count             <= beat_count - 1;
+                        end
+                        else begin
+                            MasterInterface.HTRANS <= IDLE;
+                            MasterInterface.HWDATA <= hwdata_reg;
+                            beat_count             <= 5'd0;
+                        end
+                    end
+                    if (MasterInterface.HRESP) begin
+                        error_flag             <= 1'b1;
+                        MasterInterface.HTRANS <= IDLE;
+                    end
+                end
+
+                ST_BURST_LAST: begin
+                    MasterInterface.HTRANS <= IDLE;
+                    if (hwrite_reg)
+                        MasterInterface.HWDATA <= last_hwdata_reg;
+                    if (MasterInterface.HREADY) begin
+                        if (!hwrite_reg) rdata_out <= MasterInterface.HRDATA;
+                        if (!MasterInterface.HRESP) transfer_done <= 1'b1;
+                    end
+                    if (MasterInterface.HRESP) error_flag <= 1'b1;
+                end
+
+                ST_ERROR: begin
+                    error_flag             <= 1'b1;
+                    MasterInterface.HTRANS <= IDLE;
+                    MasterInterface.HWRITE <= 1'b0;
+                    MasterInterface.HADDR  <= '0;
+                end
+
+                default: MasterInterface.HTRANS <= IDLE;
+
+            endcase
+        end
+    end
+
+    assign master_busy = (current_state != ST_IDLE);
+
+endmodule
+
